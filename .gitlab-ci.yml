@@ -1,0 +1,130 @@
+variables:
+  DOCKER_DRIVER: overlay2
+  DOCKER_HOST: tcp://localhost:2375
+  DOCKER_TLS_CERTDIR: ""
+  VERSION: ""
+  GITHUB_REPO: git@github.com:pipefy/pipestyle.git
+
+stages:
+  - deps
+  - tests
+  - build
+  - deploy
+  - deploy-beta
+
+.template:
+  image: node:10.16.3-alpine
+  before_script:
+    - apk --update add git openssh openssh-client expect
+    # Github auth
+    - mkdir -p ~/.ssh
+    - eval $(ssh-agent -s)
+    - echo -n "$GITHUB_SSH_KEY" | tr -d '\r' | ssh-add - > /dev/null
+    - mkdir -p ~/.ssh
+    - '[[ -f /.dockerenv ]] && echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config'
+    # Change .git origin
+    - git remote set-url origin $GITHUB_REPO
+    - git config --global user.name "$GIT_USER_NAME"
+    - git config --global user.email "$GIT_USER_EMAIL"
+    - git pull --rebase origin master
+    # Npm login
+    - |
+      echo "npm login"
+      expect <<EOD
+      spawn npm adduser
+      expect {
+      "Username:" {send "$NPM_USER\r"; exp_continue}
+      "Password:" {send "$NPM_PASSWORD\r"; exp_continue}
+      "Email: (this IS public)" {send "$NPM_EMAIL\r"; exp_continue}
+      }
+      EOD
+  tags:
+    - k8s
+  when: manual
+
+deps:
+  extends: .template
+  stage: deps
+  script:
+    - yarn
+  artifacts:
+    paths:
+      - node_modules/
+    expire_in: 2 hours
+  when: always
+  only:
+    - master
+    - external_pull_requests
+
+test:
+  extends: .template
+  stage: tests
+  script:
+    - yarn test:ci
+  when: on_success
+  only:
+    - master
+    - external_pull_requests
+
+build:
+  extends: .template
+  stage: build
+  script:
+    - yarn build
+  artifacts:
+    paths:
+      - lib/
+      - public/
+    expire_in: 2 hours
+  when: on_success
+  only:
+    - master
+    - external_pull_requests
+
+assets:
+  extends: .template
+  stage: deploy
+  script:
+    - node bin/deploy-assets.js
+    - git push origin HEAD:master
+  only:
+    - master
+
+docs:
+  extends: .template
+  stage: deploy
+  script:
+    - yarn deploy
+  only:
+    - master
+
+npm:
+  extends: .template
+  stage: deploy
+  script:
+    - node bin/bump-npm.js
+    - git push origin HEAD:master
+    - npm publish
+  only:
+    - master
+
+assets-beta:
+  extends: .template
+  variables:
+    DEPLOY_BETA: "true"
+  stage: deploy-beta
+  script:
+    - node bin/deploy-assets.js
+  only:
+    - external_pull_requests
+
+npm-beta:
+  extends: .template
+  variables:
+    DEPLOY_BETA: "true"
+  stage: deploy-beta
+  script:
+    - node bin/bump-npm.js
+    - npm publish --tag beta
+  only:
+    - external_pull_requests
